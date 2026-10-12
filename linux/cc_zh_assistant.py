@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 APP_NAME = "Claude Code 桌面版中文助手"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5"
 MANIFEST_URL = "https://raw.githubusercontent.com/Qkvsvh/Claude-Desktop-zh-assistant/main/translation/manifest.json"
 DATA_DIR = Path.home() / ".local" / "share" / "Claude Code 中文助手"
 BACKUP_DIR = DATA_DIR / "backups"

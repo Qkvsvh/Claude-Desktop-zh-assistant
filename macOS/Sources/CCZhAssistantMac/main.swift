@@ -4,7 +4,7 @@ import Foundation
 import Darwin
 
 private let appName = "Claude Code 中文助手"
-private let appVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "1.4.0"
+private let appVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "1.5"
 private let manifestURL = URL(string: "https://raw.githubusercontent.com/Qkvsvh/Claude-Desktop-zh-assistant/main/translation/manifest.json")!
 
 // MARK: - Translation pack sources (official + community upstreams)

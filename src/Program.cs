@@ -20,8 +20,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Claude Desktop / Claude Code 离线界面汉化伴侣")]
 [assembly: AssemblyCompany("Qkvsvh")]
 [assembly: AssemblyProduct("Claude Code 桌面版中文助手")]
-[assembly: AssemblyVersion("1.4.0.0")]
-[assembly: AssemblyFileVersion("1.4.0.0")]
+[assembly: AssemblyVersion("1.5.0.0")]
+[assembly: AssemblyFileVersion("1.5.0.0")]
 
 namespace CCZhAssistant
 {
@@ -299,7 +299,7 @@ namespace CCZhAssistant
             Controls.Add(onboardingCard);
 
             // Card Header - Version text
-            Label assistantVersion = FixedPixelLabel("Claude Code 汉化助手 v1.4.0", 13.5F, FontStyle.Bold, Color.FromArgb(76, 79, 105));
+            Label assistantVersion = FixedPixelLabel("Claude Code 汉化助手 v1.5", 13.5F, FontStyle.Bold, Color.FromArgb(76, 79, 105));
             assistantVersion.SetBounds(U(24), U(18), U(296), U(22));
             assistantVersion.TextAlign = ContentAlignment.MiddleCenter;
             onboardingCard.Controls.Add(assistantVersion);

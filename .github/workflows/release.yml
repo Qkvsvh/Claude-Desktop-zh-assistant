@@ -9,7 +9,7 @@ on:
       tag:
         description: "Release tag to publish to"
         required: false
-        default: "v1.4.0"
+        default: "v1.5"
 
 permissions:
   contents: write
@@ -77,6 +77,6 @@ jobs:
       - name: Publish or update tagged release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.tag || 'v1.4.0' }}
+          TAG_NAME: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.tag || 'v1.5' }}
         run: |
           gh release upload "$TAG_NAME" dist/*.zip --clobber || gh release create "$TAG_NAME" dist/*.zip --generate-notes --title "Claude Code 桌面版中文助手 $TAG_NAME"
