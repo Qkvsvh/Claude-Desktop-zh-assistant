@@ -126,6 +126,15 @@ namespace CCZhAssistant
         private const string AppName = "Claude Code 桌面版中文助手";
         private const string RunValueName = "CCZhAssistant";
         private const string PackManifestUrl = "https://raw.githubusercontent.com/Qkvsvh/Claude-Desktop-zh-assistant/main/translation/manifest.json";
+
+        // 语言包来源（官方云端 + 两个社区上游）与 GitHub 代理
+        private const string DefaultGitHubProxy = "https://gh-proxy.com";
+        private const string IceRawBase = "https://raw.githubusercontent.com/ICERainbow666/claude-desktop-zh-cn/master/translated-zh-CN";
+        private const string IceContentsApi = "https://api.github.com/repos/ICERainbow666/claude-desktop-zh-cn/contents/translated-zh-CN?ref=master";
+        private const string IceFallbackVersion = "2.19675.0.0";
+        private const string JavahtRawBase = "https://raw.githubusercontent.com/javaht/claude-desktop-zh-cn/main/resources";
+        private const string JavahtReleaseUrl = "https://raw.githubusercontent.com/javaht/claude-desktop-zh-cn/main/resources/release.json";
+        private static readonly string[] ProxiedGitHubHosts = { "raw.githubusercontent.com", "github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com" };
         private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
 
         private readonly bool startupMode;
@@ -144,6 +153,9 @@ namespace CCZhAssistant
         private SoftCheckBox startupCheckBox;
         private CheckBox monitorCheckBox;
         private CheckBox packUpdateCheckBox;
+        private ComboBox sourceCombo;
+        private TextBox proxyTextBox;
+        private bool suppressSourceEvent;
         private CardPanel onboardingCard;
         private ToolTip toolTip;
 
@@ -153,6 +165,8 @@ namespace CCZhAssistant
         private string detectedClaudeVersion = "未检测";
         private static int translatedCount = 32606;
         private static int pendingCount = 0;
+        private static string packSource = "official";
+        private static string githubProxy = DefaultGitHubProxy;
         private DateTime lastAppliedTime = DateTime.MinValue;
 
         private static string DataDirectory
@@ -238,7 +252,7 @@ namespace CCZhAssistant
             FormBorderStyle = FormBorderStyle.None;
             MaximizeBox = false;
             MinimizeBox = true;
-            ClientSize = new Size(U(500), U(550));
+            ClientSize = new Size(U(500), U(630));
             MinimumSize = MaximumSize = SizeFromClientSize(ClientSize);
             BackColor = Color.FromArgb(234, 236, 240);
             DoubleBuffered = true;
@@ -278,7 +292,7 @@ namespace CCZhAssistant
 
             // Centered Onboarding Card
             onboardingCard = new CardPanel();
-            onboardingCard.SetBounds(U(78), U(238), U(344), U(175));
+            onboardingCard.SetBounds(U(78), U(238), U(344), U(255));
             onboardingCard.BackColor = Color.FromArgb(236, 239, 242);
             onboardingCard.BorderColor = Color.FromArgb(215, 217, 222);
             onboardingCard.CornerRadius = U(12);
@@ -319,13 +333,47 @@ namespace CCZhAssistant
             };
             onboardingCard.Controls.Add(startupCheckBox);
 
+            // 语言包来源下拉
+            Label sourceLabel = FixedPixelLabel("语言包来源", 11.5F, FontStyle.Regular, Color.FromArgb(76, 79, 105));
+            sourceLabel.SetBounds(U(24), U(156), U(96), U(26));
+            sourceLabel.TextAlign = ContentAlignment.MiddleLeft;
+            onboardingCard.Controls.Add(sourceLabel);
+
+            sourceCombo = new ComboBox();
+            sourceCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+            sourceCombo.Font = new Font("Microsoft YaHei UI", 11F * uiScale, FontStyle.Regular, GraphicsUnit.Pixel);
+            sourceCombo.FlatStyle = FlatStyle.Flat;
+            sourceCombo.Items.AddRange(new object[] { "官方云端", "ICERainbow666", "javaht" });
+            sourceCombo.SelectedIndex = 0;
+            sourceCombo.SetBounds(U(150), U(153), U(166), U(26));
+            sourceCombo.SelectedIndexChanged += async delegate { await OnSourceComboChanged(); };
+            onboardingCard.Controls.Add(sourceCombo);
+
+            // GitHub 代理输入框
+            Label proxyLabel = FixedPixelLabel("GitHub 代理", 11.5F, FontStyle.Regular, Color.FromArgb(76, 79, 105));
+            proxyLabel.SetBounds(U(24), U(192), U(96), U(26));
+            proxyLabel.TextAlign = ContentAlignment.MiddleLeft;
+            onboardingCard.Controls.Add(proxyLabel);
+
+            proxyTextBox = new TextBox();
+            proxyTextBox.Font = new Font("Microsoft YaHei UI", 10.5F * uiScale, FontStyle.Regular, GraphicsUnit.Pixel);
+            proxyTextBox.BorderStyle = BorderStyle.FixedSingle;
+            proxyTextBox.Text = githubProxy;
+            proxyTextBox.SetBounds(U(150), U(190), U(166), U(24));
+            proxyTextBox.Leave += delegate
+            {
+                githubProxy = proxyTextBox.Text.Trim();
+                SaveSettings();
+            };
+            onboardingCard.Controls.Add(proxyTextBox);
+
             // Headless / background setting holders
             monitorCheckBox = new CheckBox { Checked = true, Visible = false };
             packUpdateCheckBox = new CheckBox { Checked = true, Visible = false };
 
             // Status Info text below Card
             infoLabel = FixedPixelLabel(BuildInfoText(), 12F, FontStyle.Regular, Color.FromArgb(103, 107, 129));
-            infoLabel.SetBounds(U(50), U(432), U(400), U(24));
+            infoLabel.SetBounds(U(50), U(512), U(400), U(24));
             infoLabel.TextAlign = ContentAlignment.MiddleCenter;
             Controls.Add(infoLabel);
 
@@ -333,14 +381,14 @@ namespace CCZhAssistant
             restartButton = new OnboardingInfoButton();
             restartButton.Text = "重启 Claude";
             restartButton.Font = new Font("Microsoft YaHei UI", 12F * uiScale, FontStyle.Regular, GraphicsUnit.Pixel);
-            restartButton.SetBounds(U(125), U(472), U(118), U(34));
+            restartButton.SetBounds(U(125), U(552), U(118), U(34));
             restartButton.Click += delegate { RestartClaude(); };
             Controls.Add(restartButton);
 
             openDataButton = new OnboardingInfoButton();
             openDataButton.Text = "配置目录";
             openDataButton.Font = new Font("Microsoft YaHei UI", 12F * uiScale, FontStyle.Regular, GraphicsUnit.Pixel);
-            openDataButton.SetBounds(U(257), U(472), U(118), U(34));
+            openDataButton.SetBounds(U(257), U(552), U(118), U(34));
             openDataButton.Click += delegate
             {
                 try { Process.Start("explorer.exe", DataDirectory); } catch { }
@@ -424,7 +472,7 @@ namespace CCZhAssistant
                 e.Graphics.FillRectangle(titleButtons, 409, 0, 91, 32);
 
             // Card drop shadow
-            using (GraphicsPath shadow = RoundedRectangle(new Rectangle(78, 240, 344, 175), 12))
+            using (GraphicsPath shadow = RoundedRectangle(new Rectangle(78, 240, 344, 255), 12))
             using (SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(22, 0, 0, 0)))
                 e.Graphics.FillPath(shadowBrush, shadow);
 
@@ -1275,12 +1323,44 @@ namespace CCZhAssistant
         // Translation Pack & Updates
         // ==========================================
 
-        private static IDictionary LoadTranslationPack()
+        private static string PackPathFor(string source)
+        {
+            string name = source == "ice" ? "pack-cache-ice.json"
+                        : source == "javaht" ? "pack-cache-javaht.json"
+                        : "translation-pack.json";
+            return Path.Combine(DataDirectory, name);
+        }
+
+        private static string PackSourceLabel(string source)
+        {
+            if (source == "ice") return "ICERainbow666";
+            if (source == "javaht") return "javaht";
+            return "官方云端";
+        }
+
+        private static bool HasDigit(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            foreach (char c in s) if (char.IsDigit(c)) return true;
+            return false;
+        }
+
+        private static string Proxied(string url)
+        {
+            string proxy = (githubProxy ?? "").Trim();
+            if (proxy.Length == 0) return url;
+            string host;
+            try { host = new Uri(url).Host; } catch { return url; }
+            if (Array.IndexOf(ProxiedGitHubHosts, host) < 0) return url;
+            string baseProxy = proxy.EndsWith("/") ? proxy.Substring(0, proxy.Length - 1) : proxy;
+            if (url.StartsWith(baseProxy + "/")) return url;
+            return baseProxy + "/" + url;
+        }
+
+        private static IDictionary LoadBundledPackRaw()
         {
             JavaScriptSerializer serializer = new JavaScriptSerializer();
             serializer.MaxJsonLength = int.MaxValue;
-
-            IDictionary embeddedPack = null;
             try
             {
                 using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("BundledTranslationPack"))
@@ -1289,26 +1369,49 @@ namespace CCZhAssistant
                     {
                         using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
                         {
-                            embeddedPack = serializer.DeserializeObject(reader.ReadToEnd()) as IDictionary;
+                            return serializer.DeserializeObject(reader.ReadToEnd()) as IDictionary;
                         }
                     }
                 }
             }
             catch { }
+            return new Dictionary<string, object>();
+        }
+
+        private static IDictionary LoadTranslationPack()
+        {
+            return LoadTranslationPack(packSource);
+        }
+
+        private static IDictionary LoadTranslationPack(string source)
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = int.MaxValue;
+
+            IDictionary embeddedPack = LoadBundledPackRaw();
 
             IDictionary selectedPack = embeddedPack;
-            if (File.Exists(PackPath))
+            string cachePath = PackPathFor(source);
+            if (File.Exists(cachePath))
             {
                 try
                 {
-                    string localJson = File.ReadAllText(PackPath, Encoding.UTF8);
+                    string localJson = File.ReadAllText(cachePath, Encoding.UTF8);
                     IDictionary localPack = serializer.DeserializeObject(localJson) as IDictionary;
-                    if (localPack != null)
+                    if (localPack != null && localPack.Contains("frontend"))
                     {
-                        string localVer = localPack.Contains("version") && localPack["version"] != null ? localPack["version"].ToString() : "0.0.0";
-                        string embVer = embeddedPack != null && embeddedPack.Contains("version") && embeddedPack["version"] != null ? embeddedPack["version"].ToString() : "0.0.0";
-                        if (CompareVersion(localVer, embVer) >= 0)
+                        if (source == "official")
                         {
+                            string localVer = localPack.Contains("version") && localPack["version"] != null ? localPack["version"].ToString() : "0.0.0";
+                            string embVer = embeddedPack != null && embeddedPack.Contains("version") && embeddedPack["version"] != null ? embeddedPack["version"].ToString() : "0.0.0";
+                            if (CompareVersion(localVer, embVer) >= 0)
+                            {
+                                selectedPack = localPack;
+                            }
+                        }
+                        else
+                        {
+                            // 上游缓存已是组装好的完整包（缺失分节已在抓取时以内置兜底）
                             selectedPack = localPack;
                         }
                     }
@@ -1333,13 +1436,150 @@ namespace CCZhAssistant
             return selectedPack;
         }
 
+        // ------------------------------------------------------------------
+        // 上游词典抓取与组装（经 GitHub 代理）
+        // ------------------------------------------------------------------
+
+        private async Task<IDictionary> FetchJsonDictAsync(string url)
+        {
+            string json = await updateHttp.GetStringAsync(Proxied(url));
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = int.MaxValue;
+            return serializer.DeserializeObject(json) as IDictionary;
+        }
+
+        private async Task<bool> UrlExistsAsync(string url)
+        {
+            try
+            {
+                using (HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Head, Proxied(url)))
+                using (HttpResponseMessage resp = await updateHttp.SendAsync(req))
+                {
+                    return resp.IsSuccessStatusCode;
+                }
+            }
+            catch { return false; }
+        }
+
+        private async Task<string> GetJavahtVersionAsync()
+        {
+            try
+            {
+                string json = await updateHttp.GetStringAsync(Proxied(JavahtReleaseUrl));
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> obj = serializer.Deserialize<Dictionary<string, object>>(json);
+                if (obj != null && obj.ContainsKey("release") && obj["release"] != null)
+                {
+                    return obj["release"].ToString();
+                }
+            }
+            catch { }
+            return "latest";
+        }
+
+        private async Task<string> ResolveIceVersionAsync(string claudeVersion)
+        {
+            string cleaned = (claudeVersion ?? "").Replace("v", "").Trim();
+            if (HasDigit(cleaned))
+            {
+                if (await UrlExistsAsync(IceRawBase + "/" + cleaned + "/ion-dist/zh-CN.json"))
+                {
+                    return cleaned;
+                }
+            }
+            try
+            {
+                string json = await updateHttp.GetStringAsync(Proxied(IceContentsApi));
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                serializer.MaxJsonLength = int.MaxValue;
+                object[] arr = serializer.DeserializeObject(json) as object[];
+                if (arr != null)
+                {
+                    List<string> versions = new List<string>();
+                    foreach (object it in arr)
+                    {
+                        IDictionary d = it as IDictionary;
+                        if (d != null && d.Contains("type") && "dir".Equals(d["type"]) && d.Contains("name"))
+                        {
+                            string nm = d["name"] as string;
+                            if (!string.IsNullOrEmpty(nm) && HasDigit(nm)) versions.Add(nm);
+                        }
+                    }
+                    if (versions.Count > 0)
+                    {
+                        if (versions.Contains(cleaned)) return cleaned;
+                        versions.Sort(CompareVersion);
+                        return versions[versions.Count - 1];
+                    }
+                }
+            }
+            catch { }
+            return IceFallbackVersion;
+        }
+
+        private async Task<string> ResolveUpstreamVersionAsync(string source, string claudeVersion)
+        {
+            if (source == "javaht") return await GetJavahtVersionAsync();
+            if (source == "ice") return await ResolveIceVersionAsync(claudeVersion);
+            return "";
+        }
+
+        private async Task<IDictionary> FetchUpstreamPackAsync(string source, string claudeVersion)
+        {
+            IDictionary pack = LoadBundledPackRaw();
+            if (source == "javaht")
+            {
+                pack["frontend"] = await FetchJsonDictAsync(JavahtRawBase + "/frontend-zh-CN.json");
+                try { pack["desktop"] = await FetchJsonDictAsync(JavahtRawBase + "/desktop-zh-CN.json"); } catch { }
+                try { pack["statsig"] = await FetchJsonDictAsync(JavahtRawBase + "/statsig-zh-CN.json"); } catch { }
+                pack["version"] = await GetJavahtVersionAsync();
+            }
+            else if (source == "ice")
+            {
+                string ver = await ResolveIceVersionAsync(claudeVersion);
+                string b = IceRawBase + "/" + ver;
+                pack["frontend"] = await FetchJsonDictAsync(b + "/ion-dist/zh-CN.json");
+                try { pack["dynamic"] = await FetchJsonDictAsync(b + "/ion-dist/dynamic/zh-CN.json"); } catch { }
+                try { pack["desktop"] = await FetchJsonDictAsync(b + "/desktop-shell/zh-CN.json"); } catch { }
+                pack["version"] = ver;
+            }
+            return pack;
+        }
+
+        private static string GetSavedUpstreamVersion(string source)
+        {
+            try
+            {
+                string p = Path.Combine(DataDirectory, "packver-" + source + ".txt");
+                return File.Exists(p) ? File.ReadAllText(p, Encoding.UTF8).Trim() : "";
+            }
+            catch { return ""; }
+        }
+
+        private static void SetSavedUpstreamVersion(string source, string ver)
+        {
+            try { File.WriteAllText(Path.Combine(DataDirectory, "packver-" + source + ".txt"), ver ?? "", Utf8NoBom); }
+            catch { }
+        }
+
         private async Task CheckPackUpdateAsync(bool forceFeedback)
         {
             if (!packUpdateCheckBox.Checked && !forceFeedback) return;
+            if (packSource == "official")
+            {
+                await CheckOfficialUpdateAsync(forceFeedback);
+            }
+            else
+            {
+                await CheckUpstreamUpdateAsync(packSource, forceFeedback);
+            }
+        }
 
+        private async Task CheckOfficialUpdateAsync(bool forceFeedback)
+        {
             try
             {
-                string manifestJson = await updateHttp.GetStringAsync(PackManifestUrl);
+                string manifestJson = await updateHttp.GetStringAsync(Proxied(PackManifestUrl));
                 JavaScriptSerializer serializer = new JavaScriptSerializer();
                 Dictionary<string, object> manifest = serializer.Deserialize<Dictionary<string, object>>(manifestJson);
 
@@ -1351,8 +1591,8 @@ namespace CCZhAssistant
                     if (CompareVersion(remoteVersion, currentVersion) > 0 && manifest.ContainsKey("downloadUrl"))
                     {
                         string downloadUrl = manifest["downloadUrl"].ToString();
-                        byte[] packBytes = await updateHttp.GetByteArrayAsync(downloadUrl);
-                        File.WriteAllBytes(PackPath, packBytes);
+                        byte[] packBytes = await updateHttp.GetByteArrayAsync(Proxied(downloadUrl));
+                        File.WriteAllBytes(PackPathFor("official"), packBytes);
 
                         if (isCurrentlyLocalized)
                         {
@@ -1370,6 +1610,98 @@ namespace CCZhAssistant
             }
             catch { }
         }
+
+        private async Task CheckUpstreamUpdateAsync(string source, bool forceFeedback)
+        {
+            try
+            {
+                ClaudeEnvironment env0 = DetectClaudeEnvironment();
+                string remoteVer = await ResolveUpstreamVersionAsync(source, env0.Version);
+                string cachePath = PackPathFor(source);
+                string savedVer = GetSavedUpstreamVersion(source);
+                if (!forceFeedback && remoteVer == savedVer && File.Exists(cachePath)) return;
+
+                IDictionary pack = await FetchUpstreamPackAsync(source, env0.Version);
+                if (pack == null || !pack.Contains("frontend")) return;
+
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                serializer.MaxJsonLength = int.MaxValue;
+                File.WriteAllText(cachePath, serializer.Serialize(pack), Utf8NoBom);
+                SetSavedUpstreamVersion(source, remoteVer);
+
+                if (isCurrentlyLocalized)
+                {
+                    ClaudeEnvironment env = DetectClaudeEnvironment();
+                    if (env.IsInstalled)
+                    {
+                        PerformApplyLocalization(env);
+                    }
+                }
+
+                EvaluateState();
+                if (forceFeedback)
+                {
+                    trayIcon.ShowBalloonTip(3000, AppName, "已从 " + PackSourceLabel(source) + " 同步语言包（v" + remoteVer + "）。", ToolTipIcon.Info);
+                }
+            }
+            catch { }
+        }
+
+        private async Task OnSourceComboChanged()
+        {
+            if (suppressSourceEvent) return;
+            string ns = sourceCombo.SelectedIndex == 1 ? "ice" : sourceCombo.SelectedIndex == 2 ? "javaht" : "official";
+            if (ns == packSource) return;
+            await SwitchPackSourceAsync(ns);
+        }
+
+        private async Task SwitchPackSourceAsync(string newSource)
+        {
+            if (busy) return;
+            busy = true;
+            packSource = newSource;
+            SaveSettings();
+            if (sourceCombo != null) sourceCombo.Enabled = false;
+            if (infoLabel != null) infoLabel.Text = "正在从 " + PackSourceLabel(newSource) + " 获取语言包...";
+
+            try
+            {
+                // 先用本地缓存/内置刷新计数，再联网拉取
+                LoadTranslationPack(newSource);
+                EvaluateState();
+                await CheckPackUpdateAsync(true);
+                LoadTranslationPack(newSource);
+
+                if (isCurrentlyLocalized)
+                {
+                    ClaudeEnvironment env = DetectClaudeEnvironment();
+                    if (env.IsInstalled)
+                    {
+                        await Task.Run(delegate { PerformApplyLocalization(env); });
+                        if (env.IsRunning)
+                        {
+                            DialogResult dr = MessageBox.Show(
+                                "语言包来源已切换为 " + PackSourceLabel(newSource) + " 并重新应用。\n\n检测到 Claude 正在运行，是否立即重启以刷新界面？",
+                                "切换完成",
+                                MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Question);
+                            if (dr == DialogResult.Yes) RestartClaude();
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("切换语言包来源失败：" + ex.Message, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                if (sourceCombo != null) sourceCombo.Enabled = true;
+                busy = false;
+                EvaluateState();
+            }
+        }
+
 
         private string GetCurrentPackVersion()
         {
@@ -1449,10 +1781,32 @@ namespace CCZhAssistant
                         if (dict.ContainsKey("AutoMonitor")) monitorCheckBox.Checked = Convert.ToBoolean(dict["AutoMonitor"]);
                         if (dict.ContainsKey("AutoAdapt")) adaptCheckBox.Checked = Convert.ToBoolean(dict["AutoAdapt"]);
                         if (dict.ContainsKey("AutoPack")) packUpdateCheckBox.Checked = Convert.ToBoolean(dict["AutoPack"]);
+                        if (dict.ContainsKey("PackSource"))
+                        {
+                            string s = Convert.ToString(dict["PackSource"]);
+                            packSource = (s == "ice" || s == "javaht") ? s : "official";
+                        }
+                        if (dict.ContainsKey("GitHubProxy")) githubProxy = Convert.ToString(dict["GitHubProxy"]);
                     }
                 }
             }
             catch { }
+
+            // 将已读取的来源/代理反映到界面（屏蔽回调以免启动即触发切换）
+            suppressSourceEvent = true;
+            try
+            {
+                if (sourceCombo != null)
+                {
+                    sourceCombo.SelectedIndex = packSource == "ice" ? 1 : packSource == "javaht" ? 2 : 0;
+                }
+                if (proxyTextBox != null)
+                {
+                    proxyTextBox.Text = githubProxy ?? "";
+                }
+            }
+            catch { }
+            suppressSourceEvent = false;
         }
 
         private void SaveSettings()
@@ -1463,7 +1817,9 @@ namespace CCZhAssistant
                 {
                     { "AutoMonitor", monitorCheckBox.Checked },
                     { "AutoAdapt", adaptCheckBox.Checked },
-                    { "AutoPack", packUpdateCheckBox.Checked }
+                    { "AutoPack", packUpdateCheckBox.Checked },
+                    { "PackSource", packSource },
+                    { "GitHubProxy", githubProxy }
                 };
                 JavaScriptSerializer serializer = new JavaScriptSerializer();
                 File.WriteAllText(SettingsFilePath, serializer.Serialize(dict), Encoding.UTF8);

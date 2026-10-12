@@ -10,12 +10,14 @@ import sys
 import json
 import glob
 import shutil
+import re
 import urllib.request
 import subprocess
 import platform
 import argparse
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 APP_NAME = "Claude Code 桌面版中文助手"
 APP_VERSION = "1.4.0"
@@ -24,6 +26,118 @@ DATA_DIR = Path.home() / ".local" / "share" / "Claude Code 中文助手"
 BACKUP_DIR = DATA_DIR / "backups"
 CONFIG_DIR = Path.home() / ".config" / "claude-desktop-zh-assistant"
 AUTOSTART_FILE = Path.home() / ".config" / "autostart" / "claude-desktop-zh-assistant.desktop"
+SETTINGS_FILE = CONFIG_DIR / "settings.json"
+
+# 语言包来源（官方云端 / 两个社区上游）与 GitHub 代理
+PACK_SOURCES = ("official", "ice", "javaht")
+PACK_SOURCE_LABELS = {
+    "official": "官方云端",
+    "ice": "ICERainbow666",
+    "javaht": "javaht",
+}
+DEFAULT_GITHUB_PROXY = "https://gh-proxy.com"
+PROXIED_GITHUB_HOSTS = {
+    "raw.githubusercontent.com",
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
+    "objects.githubusercontent.com",
+}
+ICE_RAW_BASE = "https://raw.githubusercontent.com/ICERainbow666/claude-desktop-zh-cn/master/translated-zh-CN"
+ICE_CONTENTS_API = "https://api.github.com/repos/ICERainbow666/claude-desktop-zh-cn/contents/translated-zh-CN?ref=master"
+ICE_FALLBACK_VERSION = "2.19675.0.0"
+JAVAHT_RAW_BASE = "https://raw.githubusercontent.com/javaht/claude-desktop-zh-cn/main/resources"
+JAVAHT_RELEASE_URL = "https://raw.githubusercontent.com/javaht/claude-desktop-zh-cn/main/resources/release.json"
+
+# ------------------------------------------------------------------
+# 设置持久化（语言包来源、GitHub 代理）
+# ------------------------------------------------------------------
+
+def load_settings() -> dict:
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_settings(data: dict) -> None:
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def get_pack_source() -> str:
+    source = load_settings().get("pack_source", "official")
+    return source if source in PACK_SOURCES else "official"
+
+def set_pack_source(source: str) -> None:
+    if source not in PACK_SOURCES:
+        return
+    s = load_settings()
+    s["pack_source"] = source
+    save_settings(s)
+
+def get_github_proxy() -> str:
+    """缺省（从未设置）返回默认代理；显式空串表示直连。"""
+    s = load_settings()
+    if "github_proxy" not in s:
+        return DEFAULT_GITHUB_PROXY
+    return (s.get("github_proxy") or "").strip()
+
+def set_github_proxy(value: str) -> None:
+    s = load_settings()
+    s["github_proxy"] = (value or "").strip()
+    save_settings(s)
+
+# ------------------------------------------------------------------
+# GitHub 代理包装与网络工具
+# ------------------------------------------------------------------
+
+def proxied(url: str) -> str:
+    """按配置的 GitHub 代理前缀包装 URL；非 GitHub 域名原样返回，幂等。"""
+    proxy = get_github_proxy()
+    if not proxy:
+        return url
+    try:
+        host = urlparse(url).hostname
+    except Exception:
+        return url
+    if host not in PROXIED_GITHUB_HOSTS:
+        return url
+    base = proxy[:-1] if proxy.endswith("/") else proxy
+    if url.startswith(base + "/"):
+        return url
+    return f"{base}/{url}"
+
+def _http_request(url: str, timeout: int = 10, method: str = "GET"):
+    req = urllib.request.Request(
+        proxied(url),
+        headers={"User-Agent": f"CCZhAssistant-Linux/{APP_VERSION}"},
+        method=method,
+    )
+    return urllib.request.urlopen(req, timeout=timeout)
+
+def http_get_bytes(url: str, timeout: int = 10) -> bytes:
+    with _http_request(url, timeout=timeout) as resp:
+        return resp.read()
+
+def http_get_json(url: str, timeout: int = 10):
+    return json.loads(http_get_bytes(url, timeout=timeout).decode("utf-8"))
+
+def url_exists(url: str, timeout: int = 8) -> bool:
+    try:
+        with _http_request(url, timeout=timeout, method="HEAD") as resp:
+            code = getattr(resp, "status", resp.getcode())
+            return 200 <= code < 300
+    except Exception:
+        return False
+
+def _version_key(v: str):
+    return [int(x) for x in re.findall(r"\d+", v)]
+
 
 def get_resource_path(filename: str) -> Path:
     """获取资源文件路径（支持 PyInstaller 单文件打包与源码运行）"""
@@ -134,18 +248,15 @@ def check_if_localized(env: ClaudeEnvironment) -> bool:
     zh_json = env.resources_path / "ion-dist" / "i18n" / "zh-CN.json"
     return zh_json.is_file()
 
-def load_translation_pack() -> dict:
-    """加载汉化词典包（优先加载云端更新缓存）"""
-    cached = DATA_DIR / "translation-pack.json"
-    if cached.is_file():
-        try:
-            with open(cached, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if data and "frontend" in data:
-                    return data
-        except Exception:
-            pass
+def source_cache_file(source: str) -> Path:
+    name = {
+        "official": "translation-pack.json",
+        "ice": "pack-cache-ice.json",
+        "javaht": "pack-cache-javaht.json",
+    }.get(source, "translation-pack.json")
+    return DATA_DIR / name
 
+def load_bundled_pack() -> dict:
     bundled = get_resource_path("translation-pack.json")
     if bundled.is_file():
         try:
@@ -154,6 +265,92 @@ def load_translation_pack() -> dict:
         except Exception:
             pass
     return {}
+
+def load_translation_pack(source: str = None) -> dict:
+    """加载汉化词典包（按所选来源优先读该来源缓存，否则回退内置包）"""
+    if source is None:
+        source = get_pack_source()
+    cached = source_cache_file(source)
+    if cached.is_file():
+        try:
+            with open(cached, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data and "frontend" in data:
+                    return data
+        except Exception:
+            pass
+    return load_bundled_pack()
+
+def count_entries(pack: dict, fallback: int = 32606) -> int:
+    total = 0
+    found = False
+    for key in ("frontend", "desktop", "dynamic", "statsig"):
+        section = pack.get(key)
+        if isinstance(section, dict):
+            total += len(section)
+            found = True
+    return total if found else fallback
+
+def get_javaht_version() -> str:
+    try:
+        obj = http_get_json(JAVAHT_RELEASE_URL, timeout=8)
+        rel = obj.get("release")
+        if rel:
+            return str(rel)
+    except Exception:
+        pass
+    return "latest"
+
+def resolve_ice_version(claude_version: str) -> str:
+    """为 ICERainbow666 选定版本目录：精确命中 → 列目录取最高 → 回退。"""
+    cleaned = (claude_version or "").replace("v", "").strip()
+    if any(ch.isdigit() for ch in cleaned):
+        if url_exists(f"{ICE_RAW_BASE}/{cleaned}/ion-dist/zh-CN.json"):
+            return cleaned
+    try:
+        arr = http_get_json(ICE_CONTENTS_API, timeout=8)
+        versions = [
+            it.get("name") for it in arr
+            if isinstance(it, dict) and it.get("type") == "dir"
+            and it.get("name") and any(c.isdigit() for c in it.get("name"))
+        ]
+        if versions:
+            if cleaned in versions:
+                return cleaned
+            return max(versions, key=_version_key)
+    except Exception:
+        pass
+    return ICE_FALLBACK_VERSION
+
+def fetch_upstream_pack(source: str, bundled: dict, claude_version: str = "") -> dict:
+    """从社区上游组装完整词典包；以内置包为底，缺失分节自动回退。frontend 为必需分节。"""
+    pack = dict(bundled) if bundled else {}
+    if source == "javaht":
+        pack["frontend"] = http_get_json(f"{JAVAHT_RAW_BASE}/frontend-zh-CN.json", timeout=30)
+        try:
+            pack["desktop"] = http_get_json(f"{JAVAHT_RAW_BASE}/desktop-zh-CN.json", timeout=20)
+        except Exception:
+            pass
+        try:
+            pack["statsig"] = http_get_json(f"{JAVAHT_RAW_BASE}/statsig-zh-CN.json", timeout=20)
+        except Exception:
+            pass
+        pack["version"] = get_javaht_version()
+    elif source == "ice":
+        ver = resolve_ice_version(claude_version)
+        base = f"{ICE_RAW_BASE}/{ver}"
+        pack["frontend"] = http_get_json(f"{base}/ion-dist/zh-CN.json", timeout=30)
+        try:
+            pack["dynamic"] = http_get_json(f"{base}/ion-dist/dynamic/zh-CN.json", timeout=20)
+        except Exception:
+            pass
+        try:
+            pack["desktop"] = http_get_json(f"{base}/desktop-shell/zh-CN.json", timeout=20)
+        except Exception:
+            pass
+        pack["version"] = ver
+    return pack
+
 
 def update_user_config_file(path: Path, locale: str):
     """更新用户端 locale 语言配置文件"""
@@ -379,34 +576,44 @@ def restart_claude(env: ClaudeEnvironment) -> bool:
     return False
 
 def check_remote_manifest() -> dict:
-    """检查云端最新词典版本"""
-    req = urllib.request.Request(MANIFEST_URL, headers={"User-Agent": f"CCZhAssistant-Linux/{APP_VERSION}"})
-    with urllib.request.urlopen(req, timeout=5) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    """检查官方云端最新词典版本（经 GitHub 代理）"""
+    return http_get_json(MANIFEST_URL, timeout=5)
 
-def sync_cloud_pack() -> bool:
-    """下载并同步云端词典包"""
+def sync_pack(source: str = None, claude_version: str = "") -> bool:
+    """按所选来源下载并同步词典包到该来源的缓存文件。"""
+    if source is None:
+        source = get_pack_source()
     try:
-        manifest = check_remote_manifest()
-        remote_ver = manifest.get("version", "")
-        download_url = manifest.get("downloadUrl") or manifest.get("packUrl")
-        if not download_url:
-            return False
-
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        cached_file = DATA_DIR / "translation-pack.json"
-        
-        req = urllib.request.Request(download_url, headers={"User-Agent": f"CCZhAssistant-Linux/{APP_VERSION}"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = resp.read()
+        cached_file = source_cache_file(source)
+        if source == "official":
+            manifest = check_remote_manifest()
+            remote_ver = manifest.get("version", "")
+            download_url = manifest.get("downloadUrl") or manifest.get("packUrl")
+            if not download_url:
+                return False
+            data = http_get_bytes(download_url, timeout=15)
+            pack = json.loads(data.decode("utf-8"))
+            if not pack or "frontend" not in pack:
+                return False
             cached_file.write_bytes(data)
-
-        # 保存版本信息
-        ver_file = DATA_DIR / "version.txt"
-        ver_file.write_text(remote_ver, encoding="utf-8")
-        return True
+            (DATA_DIR / "version.txt").write_text(remote_ver, encoding="utf-8")
+            return True
+        else:
+            bundled = load_bundled_pack()
+            pack = fetch_upstream_pack(source, bundled, claude_version)
+            if not pack or "frontend" not in pack:
+                return False
+            cached_file.write_text(json.dumps(pack, ensure_ascii=False), encoding="utf-8")
+            (DATA_DIR / f"version-{source}.txt").write_text(str(pack.get("version", "")), encoding="utf-8")
+            return True
     except Exception:
         return False
+
+def sync_cloud_pack() -> bool:
+    """兼容旧调用：按当前所选来源同步。"""
+    env = detect_claude_environment()
+    return sync_pack(get_pack_source(), env.version if env else "")
 
 def set_autostart(enable: bool) -> None:
     """设置 Linux XDG 开机启动"""
@@ -454,15 +661,15 @@ def run_gui():
 
     root = tk.Tk()
     root.title(APP_NAME)
-    root.geometry("500x550")
+    root.geometry("500x640")
     root.resizable(False, False)
     root.configure(bg="#ECEFF2")
 
     # 居中窗口
     root.update_idletasks()
     x = (root.winfo_screenwidth() - 500) // 2
-    y = (root.winfo_screenheight() - 550) // 2
-    root.geometry(f"500x550+{x}+{y}")
+    y = (root.winfo_screenheight() - 640) // 2
+    root.geometry(f"500x640+{x}+{y}")
 
     # 顶层状态
     env = detect_claude_environment()
@@ -487,8 +694,8 @@ def run_gui():
     title_label.pack(pady=(16, 0))
 
     # 居中主卡片
-    card = tk.Frame(root, bg="#ECEFF2", bd=1, relief="solid", padx=24, pady=18)
-    card.place(relx=0.5, rely=0.52, anchor="center", width=344, height=175)
+    card = tk.Frame(root, bg="#ECEFF2", bd=1, relief="solid", padx=24, pady=16)
+    card.place(relx=0.5, rely=0.46, anchor="center", width=360, height=260)
 
     card_title = tk.Label(card, text=f"Claude Code 汉化助手 v{APP_VERSION}", font=("Helvetica", 11, "bold"), fg="#4C4F69", bg="#ECEFF2")
     card_title.pack(pady=(4, 12))
@@ -528,6 +735,50 @@ def run_gui():
     c2 = tk.Checkbutton(chk_frame, text="开机启动", variable=autostart_var, command=on_autostart_toggle, font=("Helvetica", 10), bg="#ECEFF2", activebackground="#ECEFF2")
     c2.pack(side="right", expand=True)
 
+    # 语言包来源
+    source_frame = tk.Frame(card, bg="#ECEFF2")
+    source_frame.pack(fill="x", pady=(10, 0))
+    tk.Label(source_frame, text="语言包来源", font=("Helvetica", 10), fg="#4C4F69", bg="#ECEFF2").pack(side="left")
+    source_var = tk.StringVar(value=PACK_SOURCE_LABELS.get(get_pack_source(), "官方云端"))
+    source_menu = tk.OptionMenu(source_frame, source_var, *PACK_SOURCE_LABELS.values())
+    source_menu.config(font=("Helvetica", 9), bg="white", relief="solid", bd=1, highlightthickness=0, cursor="hand2")
+    source_menu.pack(side="right")
+
+    # GitHub 代理
+    proxy_frame = tk.Frame(card, bg="#ECEFF2")
+    proxy_frame.pack(fill="x", pady=(8, 0))
+    tk.Label(proxy_frame, text="GitHub 代理", font=("Helvetica", 10), fg="#4C4F69", bg="#ECEFF2").pack(side="left")
+    proxy_var = tk.StringVar(value=get_github_proxy())
+    proxy_entry = tk.Entry(proxy_frame, textvariable=proxy_var, font=("Helvetica", 9), width=22, relief="solid", bd=1)
+    proxy_entry.pack(side="right")
+
+    label_to_source = {v: k for k, v in PACK_SOURCE_LABELS.items()}
+
+    def on_source_change(*_):
+        new_source = label_to_source.get(source_var.get(), "official")
+        set_pack_source(new_source)
+        detail_var.set(f"正在从 {PACK_SOURCE_LABELS[new_source]} 获取语言包...")
+        root.update_idletasks()
+        sync_pack(new_source, env.version if env else "")
+        refresh_ui_state()
+        if check_if_localized(env):
+            try:
+                perform_apply_localization(env)
+                detail_var.set(f"已切换到 {PACK_SOURCE_LABELS[new_source]} 并重新应用汉化。")
+                if env.is_running and messagebox.askyesno("切换完成", "语言包来源已切换并重新应用，是否重启 Claude 刷新界面？"):
+                    restart_claude(env)
+            except Exception as e:
+                detail_var.set(f"重新应用失败: {e}")
+        else:
+            detail_var.set(f"已切换到 {PACK_SOURCE_LABELS[new_source]} 语言包来源。")
+
+    def on_proxy_change(*_):
+        set_github_proxy(proxy_var.get())
+
+    source_var.trace_add("write", on_source_change)
+    proxy_var.trace_add("write", on_proxy_change)
+
+
     # 卡片下方信息栏
     info_var = tk.StringVar()
     detail_var = tk.StringVar()
@@ -539,7 +790,8 @@ def run_gui():
         
         status_text = "运行中" if env.is_running else "未启动"
         ver_text = env.version.replace("v", "")
-        info_var.set(f"Claude v{ver_text}  ·  已汉化 32,606 条  ·  {status_text}")
+        entries = count_entries(load_translation_pack())
+        info_var.set(f"Claude v{ver_text}  ·  词条 {entries:,} 条 ({PACK_SOURCE_LABELS.get(get_pack_source(), '')})  ·  {status_text}")
         
         if not env.is_installed:
             action_btn.config(text="未检测到 Claude", bg="#9CA3AF", state="disabled")
@@ -568,7 +820,7 @@ def run_gui():
         else:
             try:
                 if auto_update_var.get():
-                    sync_cloud_pack()
+                    sync_pack(get_pack_source(), env.version)
                 perform_apply_localization(env)
                 detail_var.set("中文汉化包已成功应用！")
                 refresh_ui_state()
@@ -646,11 +898,12 @@ def run_interactive_cli():
         print(f" * 版本: {env.version}")
         print(f" * 当前汉化状态: {'[✓] 汉化已生效' if localized else '[ ] 官方原版'}")
         print(f" * 运行状态: {'运行中' if env.is_running else '未启动'}")
+    print(f" * 语言包来源: {PACK_SOURCE_LABELS.get(get_pack_source(), '官方云端')}   GitHub 代理: {get_github_proxy() or '(直连)'}")
     print("--------------------------------------------")
     print(" [1] 立即应用汉化")
     print(" [2] 恢复官方英文原版")
     print(" [3] 重启 Claude 客户端")
-    print(" [4] 检查并同步云端词典")
+    print(" [4] 检查并同步词典（当前来源）")
     print(" [0] 退出")
     print("--------------------------------------------")
     try:
@@ -667,9 +920,9 @@ def run_interactive_cli():
         restart_claude(env)
         print("[+] 已触发 Claude 重启。")
     elif choice == "4":
-        print("[*] 正在同步云端词典...")
-        if sync_cloud_pack():
-            print("[+] 云端词典同步成功！")
+        print(f"[*] 正在从 {PACK_SOURCE_LABELS.get(get_pack_source(), '官方云端')} 同步词典...")
+        if sync_pack(get_pack_source(), env.version):
+            print("[+] 词典同步成功！")
         else:
             print("[-] 同步失败，请检查网络连接。")
     elif choice == "0":
@@ -724,6 +977,8 @@ def cli_status(env: ClaudeEnvironment):
         "isRunning": env.is_running,
         "resourcesPath": str(env.resources_path) if env.resources_path else None,
         "claudeVersion": env.version,
+        "packSource": get_pack_source(),
+        "githubProxy": get_github_proxy() or "(直连)",
     }
     print(json.dumps(status_data, ensure_ascii=False, indent=2))
 
@@ -732,11 +987,28 @@ def main():
     parser.add_argument("--apply", action="store_true", help="一键应用中文汉化包")
     parser.add_argument("--restore", action="store_true", help="一键恢复官方英文原版")
     parser.add_argument("--restart", action="store_true", help="重启 Claude Desktop 客户端")
-    parser.add_argument("--sync", action="store_true", help="检查并同步最新云端汉化包")
+    parser.add_argument("--sync", action="store_true", help="检查并同步最新词典包（按当前所选来源）")
     parser.add_argument("--status", action="store_true", help="以 JSON 格式输出当前安装与汉化状态")
     parser.add_argument("--cli", action="store_true", help="强制进入命令行终端交互模式")
+    parser.add_argument("--source", choices=PACK_SOURCES, help="设置语言包来源 (official/ice/javaht) 并持久化")
+    parser.add_argument("--proxy", help="设置 GitHub 代理前缀并持久化（传入空字符串表示直连）")
 
     args = parser.parse_args()
+
+    if args.proxy is not None:
+        set_github_proxy(args.proxy)
+        print(f"[+] GitHub 代理已设为: {args.proxy.strip() or '(直连)'}")
+
+    if args.source:
+        set_pack_source(args.source)
+        print(f"[+] 语言包来源已设为: {PACK_SOURCE_LABELS[args.source]}")
+        env0 = detect_claude_environment()
+        print(f"[*] 正在从 {PACK_SOURCE_LABELS[args.source]} 同步词典...")
+        if sync_pack(args.source, env0.version):
+            print("[+] 词典已同步到本地缓存。")
+        else:
+            print("[-] 词典同步失败（应用时将回退内置词典）。")
+
     env = detect_claude_environment()
 
     if args.status:
@@ -748,13 +1020,17 @@ def main():
     elif args.restart:
         restart_claude(env)
     elif args.sync:
-        if sync_cloud_pack():
-            print("[+] 云端词典同步成功！")
+        print(f"[*] 正在从 {PACK_SOURCE_LABELS[get_pack_source()]} 同步词典...")
+        if sync_pack(get_pack_source(), env.version):
+            print("[+] 词典同步成功！")
         else:
             print("[-] 同步失败。")
             sys.exit(1)
     elif args.cli:
         run_interactive_cli()
+    elif args.source or args.proxy is not None:
+        # 仅设置了来源/代理，不进入 GUI
+        pass
     else:
         # 默认模式：优先启动 GUI，无显示服务或缺少 Tkinter 时自动回退至终端交互
         run_gui()
