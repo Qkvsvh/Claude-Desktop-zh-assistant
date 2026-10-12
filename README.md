@@ -12,7 +12,7 @@
 
 ### Windows 用户使用
 
-1. 从 [Releases](https://github.com/CX-ArtLab/Claude-Desktop-zh-assistant/releases/latest) 下载最新版本的 `CCZhAssistant-windows.zip`。
+1. 从 [Releases](https://github.com/Qkvsvh/Claude-Desktop-zh-assistant/releases/latest) 下载最新版本的 `CCZhAssistant-windows.zip`。
 2. 将 ZIP 解压到任意文件夹。无需安装开发环境，也不需要将 EXE 放入 Claude 安装目录。
 3. 运行解压后的 `CCZhAssistant.exe`。
 4. 点击主卡片中的 **“立即应用汉化”** 胶囊按钮即可一键完成汉化。
@@ -23,10 +23,11 @@
 
 ### macOS 用户使用（Apple Silicon）
 
-1. 从 [Releases](https://github.com/CX-ArtLab/Claude-Desktop-zh-assistant/releases/latest) 下载最新版本的 `CCZhAssistant-macOS-apple-silicon.zip`。
+1. 从 [Releases](https://github.com/Qkvsvh/Claude-Desktop-zh-assistant/releases/latest) 下载最新版本的 `CCZhAssistant-macOS-apple-silicon.zip`。
 2. 双击解压得到 `CCZhAssistant-macOS-apple-silicon.app`，将其拖入 **“访达 (Finder) -> 应用程序 (/Applications)”** 中。
 3. 双击运行助手，点击 **“立即应用汉化”**。应用完成后若 Claude 处于运行状态，点击 **“重启 Claude”** 即可体验完整中文界面。
 4. 如需开机自启或同步最新词典，勾选界面中的“开机启动”与“自动更新”即可。
+5. 可在卡片中选择 **“语言包来源”** 切换不同词典来源；在 **“GitHub 代理”** 输入框中填写加速代理前缀（默认已预填，留空则直连），以便在网络受限环境下顺畅拉取在线词典。
 
 > **Gatekeeper 安全提示**：由于开源程序未购买昂贵的 Apple 开发者企业签名证书，若首次打开弹出安全提示，可前往 **“系统设置 -> 隐私与安全性”** 点击 **“仍要打开”**；或在终端中执行：
 > ```bash
@@ -35,7 +36,7 @@
 
 ### Linux / Ubuntu 用户使用
 
-1. 从 [Releases](https://github.com/CX-ArtLab/Claude-Desktop-zh-assistant/releases/latest) 下载最新版本的 `CCZhAssistant-linux.zip`。
+1. 从 [Releases](https://github.com/Qkvsvh/Claude-Desktop-zh-assistant/releases/latest) 下载最新版本的 `CCZhAssistant-linux.zip`。
 2. 解压压缩包：
    ```bash
    unzip CCZhAssistant-linux.zip -d CCZhAssistant-linux
@@ -65,6 +66,8 @@
 - **非破坏性外挂伴侣**：不改写核心数字签名与二进制逻辑，保障 Cowork 沙箱及工作区完全可用。
 - **一键应用与一键还原**：自动备份原始配置，随时可一键完美还原至官方原版英文状态。
 - **海量词典预置**：内置打包 32,600+ 条官方界面与交互词条（涵盖前端、会话、设置、侧边栏、快捷键与模型选项等，全面人工清洗机翻痕迹）。
+- **多语言包来源可选（macOS）**：除内置官方词典外，支持在界面中切换不同的社区上游语言包来源，一键获取更完整或更新的词条；上游缺失的分节自动回退内置词典，确保功能不丢失。
+- **GitHub 代理加速（macOS）**：内置可自定义的 GitHub 代理前缀（默认预填公共加速代理），在网络受限环境下也能顺畅拉取在线词典与检查更新；留空即恢复直连。
 - **极简居中卡片美学**：采用现代化无边框沉浸式视窗，结合高精度矢量抗锯齿绘制与 DPI 自适应防挤压方案（多尺度高分屏均清晰锐利）。
 - **智能版本检测与自动适配**：实时监测 Claude Desktop 进程状态与版本升级，检测到新版本后自动增量适配。
 - **待适配词条扫描器**：自动比对官方英文词库与现有汉化，未翻译的新增词条自动输出到用户配置目录下的 `待适配词条.json`，方便社区贡献与后续补充。
@@ -124,6 +127,21 @@ bash linux/build-linux.sh
   - `manifest.json`：词典版本控制与云端更新元数据。
 - 发布版会直接把构建时的完整词典内嵌打包进应用，完全离线即可使用。
 - 开启“自动更新”后，程序会自动检测并优先加载用户数据目录中的最新更新词典。
+- macOS 端支持在界面中切换“语言包来源”，可从内置词典或社区上游来源获取词条；所有在线请求均会按照所配置的 GitHub 代理前缀进行加速。
+
+---
+
+## 致谢
+
+本项目站在许多开源贡献者的肩膀上构建，特此致谢：
+
+- **原项目**：感谢最初开源的 Claude Desktop 中文汉化助手项目，为本项目提供了「非破坏性外挂式汉化」的整体思路与跨平台实现基础。
+- **上游语言包**：感谢以下两个社区项目持续维护高质量的 Claude Desktop 中文词典，本项目 macOS 端的「语言包来源」功能可直接选用它们：
+  - [ICERainbow666/claude-desktop-zh-cn](https://github.com/ICERainbow666/claude-desktop-zh-cn)
+  - [javaht/claude-desktop-zh-cn](https://github.com/javaht/claude-desktop-zh-cn)
+- 同时感谢 **Anthropic** 打造了优秀的 Claude Desktop / Claude Code。
+
+> 若本项目在致谢中遗漏了您的贡献，欢迎提交 Issue 或 PR 指正。
 
 ---
 

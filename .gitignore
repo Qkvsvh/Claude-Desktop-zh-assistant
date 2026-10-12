@@ -8,3 +8,9 @@ dist/
 settings.json
 backups/
 scratch/
+
+# OS 杂项
+.DS_Store
+
+# 内部交接文档（含本地路径等信息，不公开提交）
+交接文档.md

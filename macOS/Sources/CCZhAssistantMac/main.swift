@@ -5,7 +5,61 @@ import Darwin
 
 private let appName = "Claude Code 中文助手"
 private let appVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "1.4.0"
-private let manifestURL = URL(string: "https://raw.githubusercontent.com/CX-ArtLab/Claude-Desktop-zh-assistant/main/translation/manifest.json")!
+private let manifestURL = URL(string: "https://raw.githubusercontent.com/Qkvsvh/Claude-Desktop-zh-assistant/main/translation/manifest.json")!
+
+// MARK: - Translation pack sources (official + community upstreams)
+
+private enum PackSource: String, CaseIterable, Identifiable {
+    case official
+    case iceRainbow
+    case javaht
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .official: return "官方云端"
+        case .iceRainbow: return "ICERainbow666"
+        case .javaht: return "javaht"
+        }
+    }
+
+    // Per-source cache file in the data directory.
+    var cacheFileName: String {
+        switch self {
+        case .official: return "translation-pack.json"
+        case .iceRainbow: return "pack-cache-ice.json"
+        case .javaht: return "pack-cache-javaht.json"
+        }
+    }
+
+    // UserDefaults key storing the last synced version for this source.
+    var versionKey: String {
+        switch self {
+        case .official: return "TranslationPackVersion"
+        case .iceRainbow: return "PackVersion.ice"
+        case .javaht: return "PackVersion.javaht"
+        }
+    }
+}
+
+// Upstream raw bases. Both upstreams ship the same hashed-key JSON format as this
+// project, so each section maps directly onto the pack's frontend/desktop/dynamic/statsig.
+private let iceRainbowRawBase = "https://raw.githubusercontent.com/ICERainbow666/claude-desktop-zh-cn/master/translated-zh-CN"
+private let iceRainbowContentsAPI = URL(string: "https://api.github.com/repos/ICERainbow666/claude-desktop-zh-cn/contents/translated-zh-CN?ref=master")!
+private let iceRainbowFallbackVersion = "2.19675.0.0"
+private let javahtRawBase = "https://raw.githubusercontent.com/javaht/claude-desktop-zh-cn/main/resources"
+private let javahtReleaseURL = URL(string: "https://raw.githubusercontent.com/javaht/claude-desktop-zh-cn/main/resources/release.json")!
+
+// Default GitHub acceleration proxy. Empty string means direct connection.
+private let defaultGitHubProxy = "https://gh-proxy.com"
+private let proxiedGitHubHosts: Set<String> = [
+    "raw.githubusercontent.com",
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
+    "objects.githubusercontent.com"
+]
 
 private func assistantIconImage() -> NSImage {
     if let bundled = Bundle.main.url(forResource: "assistant-icon", withExtension: "png"),
@@ -41,6 +95,8 @@ private final class AppModel: ObservableObject {
     @Published var launchAtLogin: Bool
     @Published var claudeEnv = ClaudeEnvironment()
     @Published var totalEntries = 32606
+    @Published var packSource: PackSource
+    @Published var proxyPrefix: String
 
     private var translationPack: [String: Any] = [:]
     private var monitorTask: Task<Void, Never>?
@@ -48,7 +104,14 @@ private final class AppModel: ObservableObject {
     init() {
         autoUpdate = UserDefaults.standard.object(forKey: "AutoUpdate") as? Bool ?? true
         launchAtLogin = LaunchAtLogin.isEnabled
-        translationPack = Self.loadTranslationPack()
+        let source = PackSource(rawValue: UserDefaults.standard.string(forKey: "PackSource") ?? "") ?? .official
+        packSource = source
+        if UserDefaults.standard.object(forKey: "GitHubProxy") == nil {
+            UserDefaults.standard.set(defaultGitHubProxy, forKey: "GitHubProxy")
+        }
+        proxyPrefix = UserDefaults.standard.string(forKey: "GitHubProxy") ?? defaultGitHubProxy
+        translationPack = Self.loadTranslationPack(source: source)
+        totalEntries = Self.countEntries(translationPack, fallback: 32606)
         refreshEnvironment()
 
         monitorTask = Task { [weak self] in
@@ -57,7 +120,7 @@ private final class AppModel: ObservableObject {
                 guard let self else { continue }
                 self.refreshEnvironment()
                 if self.autoUpdate && !self.isBusy {
-                    await self.checkAndUpdatePack(silent: true)
+                    _ = await self.checkAndUpdatePack(silent: true)
                 }
             }
         }
@@ -101,7 +164,7 @@ private final class AppModel: ObservableObject {
             status = "正在部署..."
             detail = "正在写入中文语言包并优化配置..."
             if autoUpdate {
-                _ = try? await checkAndUpdatePack(silent: true)
+                _ = await checkAndUpdatePack(silent: true)
             }
             do {
                 try Self.performApplyLocalization(env: claudeEnv, pack: translationPack)
@@ -139,6 +202,58 @@ private final class AppModel: ObservableObject {
         LaunchAtLogin.setEnabled(value)
     }
 
+    func setProxyPrefix(_ value: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        proxyPrefix = trimmed
+        UserDefaults.standard.set(trimmed, forKey: "GitHubProxy")
+    }
+
+    func setPackSource(_ value: PackSource) {
+        guard value != packSource else { return }
+        packSource = value
+        UserDefaults.standard.set(value.rawValue, forKey: "PackSource")
+        // Load whatever is already cached/bundled for the new source immediately,
+        // then pull the latest and (if already localized) re-apply in the background.
+        translationPack = Self.loadTranslationPack(source: value)
+        totalEntries = Self.countEntries(translationPack, fallback: totalEntries)
+        Task { await switchSourceDownloadAndApply(source: value) }
+    }
+
+    private func switchSourceDownloadAndApply(source: PackSource) async {
+        guard !isBusy else { return }
+        isBusy = true
+        status = "正在切换来源..."
+        detail = "正在从 \(source.displayName) 获取语言包..."
+
+        _ = await checkAndUpdatePack(silent: true)
+        totalEntries = Self.countEntries(translationPack, fallback: totalEntries)
+
+        var usingFallback = false
+        if source != .official {
+            let cacheURL = Self.dataDirectory().appendingPathComponent(source.cacheFileName)
+            usingFallback = !FileManager.default.fileExists(atPath: cacheURL.path)
+        }
+        let fallbackNote = usingFallback ? "（在线获取失败，暂用内置词典兜底）" : ""
+
+        if isLocalized && claudeEnv.isInstalled {
+            do {
+                try Self.performApplyLocalization(env: claudeEnv, pack: translationPack)
+                refreshEnvironment()
+                detail = "已切换到 \(source.displayName) 并重新应用汉化。\(fallbackNote)"
+                isBusy = false
+                promptRestartIfNeeded()
+                return
+            } catch {
+                detail = "切换到 \(source.displayName) 后重新应用失败: \(error.localizedDescription)"
+                isBusy = false
+                return
+            }
+        }
+        refreshEnvironment()
+        detail = "已切换到 \(source.displayName) 语言包来源。\(fallbackNote)"
+        isBusy = false
+    }
+
     private func promptRestartIfNeeded() {
         guard claudeEnv.isRunning else { return }
         let alert = NSAlert()
@@ -153,8 +268,17 @@ private final class AppModel: ObservableObject {
     }
 
     private func checkAndUpdatePack(silent: Bool) async -> Bool {
+        switch packSource {
+        case .official:
+            return await checkOfficialUpdate(silent: silent)
+        case .iceRainbow, .javaht:
+            return await checkUpstreamUpdate(source: packSource, silent: silent)
+        }
+    }
+
+    private func checkOfficialUpdate(silent: Bool) async -> Bool {
         do {
-            let (manifestData, _) = try await URLSession.shared.data(from: manifestURL)
+            let (manifestData, _) = try await URLSession.shared.data(from: Self.proxied(manifestURL))
             guard let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
                   let version = manifest["version"] as? String,
                   let downloadUrlString = (manifest["downloadUrl"] as? String) ?? (manifest["packUrl"] as? String),
@@ -162,19 +286,20 @@ private final class AppModel: ObservableObject {
 
             let bundledVersion = Self.bundledTranslationPackVersion()
             guard Self.comparePackVersions(version, bundledVersion) == .orderedDescending else { return false }
-            let cachedVersion = UserDefaults.standard.string(forKey: "TranslationPackVersion") ?? ""
+            let cachedVersion = UserDefaults.standard.string(forKey: PackSource.official.versionKey) ?? ""
             guard Self.comparePackVersions(version, cachedVersion) == .orderedDescending else { return false }
 
-            let (packData, _) = try await URLSession.shared.data(from: url)
+            let (packData, _) = try await URLSession.shared.data(from: Self.proxied(url))
             guard let pack = try JSONSerialization.jsonObject(with: packData) as? [String: Any], !pack.isEmpty else { return false }
 
             translationPack = pack
-            try packData.write(to: Self.dataDirectory().appendingPathComponent("translation-pack.json"), options: .atomic)
-            UserDefaults.standard.set(version, forKey: "TranslationPackVersion")
+            try packData.write(to: Self.dataDirectory().appendingPathComponent(PackSource.official.cacheFileName), options: .atomic)
+            UserDefaults.standard.set(version, forKey: PackSource.official.versionKey)
 
-            if let stats = manifest["stats"] as? [String: Int], let total = manifest["totalEntries"] as? Int {
+            if let total = manifest["totalEntries"] as? Int {
                 totalEntries = total
-                _ = stats
+            } else {
+                totalEntries = Self.countEntries(pack, fallback: totalEntries)
             }
 
             if isLocalized && claudeEnv.isInstalled {
@@ -185,6 +310,157 @@ private final class AppModel: ObservableObject {
         } catch {
             return false
         }
+    }
+
+    private func checkUpstreamUpdate(source: PackSource, silent: Bool) async -> Bool {
+        do {
+            let remoteVersion = try await Self.resolveUpstreamVersion(source: source, claudeVersion: claudeEnv.version)
+            let cached = UserDefaults.standard.string(forKey: source.versionKey) ?? ""
+            let cacheURL = Self.dataDirectory().appendingPathComponent(source.cacheFileName)
+            let cacheExists = FileManager.default.fileExists(atPath: cacheURL.path)
+            guard remoteVersion != cached || !cacheExists else { return false }
+
+            let pack = try await Self.fetchUpstreamPack(source: source, version: remoteVersion)
+            guard !pack.isEmpty else { return false }
+
+            translationPack = pack
+            totalEntries = Self.countEntries(pack, fallback: totalEntries)
+            if let data = try? JSONSerialization.data(withJSONObject: pack, options: []) {
+                try? data.write(to: cacheURL, options: .atomic)
+            }
+            UserDefaults.standard.set(remoteVersion, forKey: source.versionKey)
+
+            if isLocalized && claudeEnv.isInstalled {
+                try Self.performApplyLocalization(env: claudeEnv, pack: pack)
+            }
+            if !silent { detail = "已从 \(source.displayName) 同步语言包 (v\(remoteVersion))。" }
+            return true
+        } catch {
+            if !silent { detail = "从 \(source.displayName) 同步失败: \(error.localizedDescription)" }
+            return false
+        }
+    }
+
+    // MARK: - Upstream fetch & assembly
+
+    /// The effective GitHub proxy prefix. Reads live from UserDefaults so the static network
+    /// helpers can honor it without threading instance state through every call. An absent
+    /// value defaults to gh-proxy.com; an explicit empty string means a direct connection.
+    static func effectiveProxy() -> String {
+        guard let stored = UserDefaults.standard.string(forKey: "GitHubProxy") else { return defaultGitHubProxy }
+        return stored.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Wrap a GitHub URL string with the configured proxy prefix (e.g.
+    /// "https://gh-proxy.com/https://raw.githubusercontent.com/..."). Non-GitHub hosts and an
+    /// empty proxy are returned unchanged. Idempotent: already-proxied URLs are left alone.
+    static func proxied(_ urlString: String) -> String {
+        let proxy = effectiveProxy()
+        guard !proxy.isEmpty else { return urlString }
+        guard let host = URL(string: urlString)?.host, proxiedGitHubHosts.contains(host) else { return urlString }
+        let base = proxy.hasSuffix("/") ? String(proxy.dropLast()) : proxy
+        if urlString.hasPrefix(base + "/") { return urlString }
+        return "\(base)/\(urlString)"
+    }
+
+    static func proxied(_ url: URL) -> URL {
+        URL(string: proxied(url.absoluteString)) ?? url
+    }
+
+    /// Resolve a lightweight "version" indicator for an upstream source, used both as a
+    /// change-detection token and (for ICERainbow666) as the version folder to download.
+    static func resolveUpstreamVersion(source: PackSource, claudeVersion: String) async throws -> String {
+        switch source {
+        case .javaht:
+            let (data, _) = try await URLSession.shared.data(from: Self.proxied(javahtReleaseURL))
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let rel = obj["release"] as? String, !rel.isEmpty {
+                return rel
+            }
+            return "latest"
+        case .iceRainbow:
+            return try await resolveIceVersion(claudeVersion: claudeVersion)
+        case .official:
+            return ""
+        }
+    }
+
+    static func resolveIceVersion(claudeVersion: String) async throws -> String {
+        let cleaned = claudeVersion.replacingOccurrences(of: "v", with: "").trimmingCharacters(in: .whitespaces)
+        // 1. Prefer an exact match for the installed Claude version (cheap HEAD probe, no API).
+        if cleaned.rangeOfCharacter(from: .decimalDigits) != nil,
+           let url = URL(string: "\(iceRainbowRawBase)/\(cleaned)/ion-dist/zh-CN.json"),
+           await urlExists(url) {
+            return cleaned
+        }
+        // 2. List available version folders via the GitHub contents API, pick the highest.
+        if let versions = try? await listIceVersions(), !versions.isEmpty {
+            if versions.contains(cleaned) { return cleaned }
+            if let best = versions.max(by: { $0.compare($1, options: .numeric) == .orderedAscending }) {
+                return best
+            }
+        }
+        // 3. Last-resort hardcoded fallback.
+        return iceRainbowFallbackVersion
+    }
+
+    static func listIceVersions() async throws -> [String] {
+        let (data, _) = try await URLSession.shared.data(from: Self.proxied(iceRainbowContentsAPI))
+        guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        return arr.compactMap { item in
+            if let type = item["type"] as? String, type == "dir",
+               let name = item["name"] as? String,
+               name.rangeOfCharacter(from: .decimalDigits) != nil {
+                return name
+            }
+            return nil
+        }
+    }
+
+    static func urlExists(_ url: URL) async -> Bool {
+        var req = URLRequest(url: proxied(url))
+        req.httpMethod = "HEAD"
+        if let (_, resp) = try? await URLSession.shared.data(for: req),
+           let http = resp as? HTTPURLResponse {
+            return (200...299).contains(http.statusCode)
+        }
+        return false
+    }
+
+    /// Build a complete pack from an upstream source. Starts from the bundled pack so that
+    /// sections the upstream does not provide (javaht has no dynamic; ICERainbow666 has no
+    /// statsig) fall back to the bundled dictionary instead of regressing. The primary
+    /// `frontend` section is mandatory and will throw on failure.
+    static func fetchUpstreamPack(source: PackSource, version: String) async throws -> [String: Any] {
+        var pack = loadBundledPack()
+        switch source {
+        case .javaht:
+            pack["frontend"] = try await fetchJSONDict("\(javahtRawBase)/frontend-zh-CN.json")
+            if let desktop = try? await fetchJSONDict("\(javahtRawBase)/desktop-zh-CN.json") { pack["desktop"] = desktop }
+            if let statsig = try? await fetchJSONDict("\(javahtRawBase)/statsig-zh-CN.json") { pack["statsig"] = statsig }
+            pack["version"] = version
+        case .iceRainbow:
+            let base = "\(iceRainbowRawBase)/\(version)"
+            pack["frontend"] = try await fetchJSONDict("\(base)/ion-dist/zh-CN.json")
+            if let dynamic = try? await fetchJSONDict("\(base)/ion-dist/dynamic/zh-CN.json") { pack["dynamic"] = dynamic }
+            if let desktop = try? await fetchJSONDict("\(base)/desktop-shell/zh-CN.json") { pack["desktop"] = desktop }
+            pack["version"] = version
+        case .official:
+            break
+        }
+        return pack
+    }
+
+    static func fetchJSONDict(_ urlString: String) async throws -> [String: Any] {
+        guard let url = URL(string: proxied(urlString)) else { throw URLError(.badURL) }
+        let (data, resp) = try await URLSession.shared.data(from: url)
+        if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw URLError(.badServerResponse)
+        }
+        guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw URLError(.cannotParseResponse)
+        }
+        return dict
     }
 
     // MARK: - Core Implementation Logic
@@ -538,18 +814,47 @@ private final class AppModel: ObservableObject {
         return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
-    static func loadTranslationPack() -> [String: Any] {
-        let bundled: [String: Any] = loadJSON(named: "translation-pack", ext: "json") ?? [:]
-        let bundledVersion = bundledTranslationPackVersion()
-        let cachedVersion = UserDefaults.standard.string(forKey: "TranslationPackVersion") ?? ""
-        let cachedURL = dataDirectory().appendingPathComponent("translation-pack.json")
-        if comparePackVersions(cachedVersion, bundledVersion) == .orderedDescending,
-           let data = try? Data(contentsOf: cachedURL),
-           let cached = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-           !cached.isEmpty {
-            return cached
+    static func loadBundledPack() -> [String: Any] {
+        return loadJSON(named: "translation-pack", ext: "json") ?? [:]
+    }
+
+    static func loadTranslationPack(source: PackSource) -> [String: Any] {
+        let bundled = loadBundledPack()
+        switch source {
+        case .official:
+            let bundledVersion = bundledTranslationPackVersion()
+            let cachedVersion = UserDefaults.standard.string(forKey: source.versionKey) ?? ""
+            let cachedURL = dataDirectory().appendingPathComponent(source.cacheFileName)
+            if comparePackVersions(cachedVersion, bundledVersion) == .orderedDescending,
+               let data = try? Data(contentsOf: cachedURL),
+               let cached = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+               !cached.isEmpty {
+                return cached
+            }
+            return bundled
+        case .iceRainbow, .javaht:
+            // Upstream caches already store a fully-assembled pack (with bundled fallback
+            // sections baked in at fetch time), so just prefer the cache when present.
+            let cachedURL = dataDirectory().appendingPathComponent(source.cacheFileName)
+            if let data = try? Data(contentsOf: cachedURL),
+               let cached = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+               !cached.isEmpty {
+                return cached
+            }
+            return bundled
         }
-        return bundled
+    }
+
+    static func countEntries(_ pack: [String: Any], fallback: Int) -> Int {
+        var total = 0
+        var found = false
+        for key in ["frontend", "desktop", "dynamic", "statsig"] {
+            if let dict = pack[key] as? [String: Any] {
+                total += dict.count
+                found = true
+            }
+        }
+        return found ? total : fallback
     }
 
     static func bundledTranslationPackVersion() -> String {
@@ -568,7 +873,7 @@ private final class AppModel: ObservableObject {
 }
 
 private enum LaunchAtLogin {
-    static let label = "com.cxartlab.claude-desktop-zh-assistant"
+    static let label = "com.qkvsvh.claude-desktop-zh-assistant"
 
     static var isEnabled: Bool {
         FileManager.default.fileExists(atPath: agentURL.path)
@@ -619,7 +924,7 @@ private struct WindowConfigurator: NSViewRepresentable {
 
     private func configure(_ window: NSWindow?) {
         guard let window else { return }
-        let size = NSSize(width: 500, height: 550)
+        let size = NSSize(width: 500, height: 660)
         guard window.contentView?.frame.size != size || window.styleMask.contains(.resizable) else { return }
         window.setContentSize(size)
         window.minSize = size
@@ -702,6 +1007,34 @@ private struct ContentView: View {
                     .padding(.horizontal, 28)
                     .padding(.top, 18)
 
+                    HStack(spacing: 8) {
+                        Text("语言包来源")
+                            .font(.system(size: 13))
+                            .foregroundColor(Color(red: 0.30, green: 0.31, blue: 0.42))
+                        Picker("", selection: Binding(get: { model.packSource }, set: model.setPackSource)) {
+                            ForEach(PackSource.allCases) { src in
+                                Text(src.displayName).tag(src)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(width: 150)
+                        .disabled(model.isBusy)
+                    }
+                    .padding(.top, 16)
+
+                    HStack(spacing: 8) {
+                        Text("GitHub 代理")
+                            .font(.system(size: 13))
+                            .foregroundColor(Color(red: 0.30, green: 0.31, blue: 0.42))
+                        TextField("留空则直连", text: Binding(get: { model.proxyPrefix }, set: model.setProxyPrefix))
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12))
+                            .frame(width: 220)
+                            .disabled(model.isBusy)
+                    }
+                    .padding(.top, 12)
+
                     HStack(spacing: 28) {
                         Toggle("自动更新", isOn: Binding(get: { model.autoUpdate }, set: model.setAutoUpdate))
                         Toggle("开机启动", isOn: Binding(get: { model.launchAtLogin }, set: model.setLaunchAtLogin))
@@ -709,9 +1042,9 @@ private struct ContentView: View {
                     .toggleStyle(.checkbox)
                     .font(.system(size: 13))
                     .foregroundColor(Color(red: 0.30, green: 0.31, blue: 0.42))
-                    .padding(.top, 18)
+                    .padding(.top, 14)
                 }
-                .frame(width: 344, height: 172)
+                .frame(width: 344, height: 266)
                 .background(Color(red: 0.925, green: 0.937, blue: 0.949))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.gray.opacity(0.24)))
@@ -768,7 +1101,7 @@ private struct ContentView: View {
                 Spacer()
             }
         }
-        .frame(width: 500, height: 550)
+        .frame(width: 500, height: 660)
         .background(WindowConfigurator())
     }
 }

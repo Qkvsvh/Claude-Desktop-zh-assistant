@@ -18,7 +18,7 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("Claude Code 桌面版中文助手")]
 [assembly: AssemblyDescription("Claude Desktop / Claude Code 离线界面汉化伴侣")]
-[assembly: AssemblyCompany("CX-ArtLab")]
+[assembly: AssemblyCompany("Qkvsvh")]
 [assembly: AssemblyProduct("Claude Code 桌面版中文助手")]
 [assembly: AssemblyVersion("1.4.0.0")]
 [assembly: AssemblyFileVersion("1.4.0.0")]
@@ -125,7 +125,7 @@ namespace CCZhAssistant
 
         private const string AppName = "Claude Code 桌面版中文助手";
         private const string RunValueName = "CCZhAssistant";
-        private const string PackManifestUrl = "https://raw.githubusercontent.com/CX-ArtLab/Claude-Desktop-zh-assistant/main/translation/manifest.json";
+        private const string PackManifestUrl = "https://raw.githubusercontent.com/Qkvsvh/Claude-Desktop-zh-assistant/main/translation/manifest.json";
         private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
 
         private readonly bool startupMode;
